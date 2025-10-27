@@ -1,66 +1,90 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from ta.trend import SMAIndicator, EMAIndicator, MACD
 from ta.momentum import RSIIndicator
-import requests
-import os
-import json
+import requests, os, json
 import openai
+from datetime import datetime
 
 # -----------------------------
 # SETUP
 # -----------------------------
-st.set_page_config(layout="wide", page_title="Stock Analyzer — Pro Dashboard")
+st.set_page_config(layout="wide", page_title="Pro Stock Analyzer")
 
-# Use your API key directly (for this purpose only)
+# Use your API key
 os.environ["OPENAI_API_KEY"] = "sk-abcdef1234567890abcdef1234567890abcdef12"
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # -----------------------------
-# FETCHERS
+# SIDEBAR INPUT
+# -----------------------------
+st.sidebar.header("Stock & Settings")
+ticker_input = st.sidebar.text_input("Ticker (AAPL, MSFT, TSLA)", "AAPL").upper()
+period_choice = st.sidebar.selectbox("Historical Period", ["1mo","3mo","6mo","1y","2y","5y","max"], index=3)
+interval_choice = st.sidebar.selectbox("Interval", ["1d","1wk","1mo"], index=0)
+chart_type = st.sidebar.selectbox("Chart Type", ["candlestick","line","bar"])
+show_ma = st.sidebar.checkbox("Show Moving Averages", True)
+show_indicators = st.sidebar.checkbox("Show Indicators (RSI, MACD)", True)
+
+st.sidebar.header("AI Assistant")
+use_ai = st.sidebar.checkbox("Enable AI Stock Assistant")
+
+# -----------------------------
+# FETCH DATA FUNCTIONS
 # -----------------------------
 @st.cache_data(ttl=43200)
-def fetch_ticker_info(ticker: str):
-    """Fetch ticker info safely with caching."""
+def fetch_ticker_data(ticker):
+    """Fetch company info, fundamentals, historical data safely."""
+    # Yahoo Finance
     info, fast_info = {}, {}
+    df = pd.DataFrame()
     try:
         t = yf.Ticker(ticker)
-        try:
-            fast_info = dict(t.fast_info)
-        except Exception:
-            pass
-        try:
-            raw_info = t.get_info()
-            if isinstance(raw_info, dict):
-                info = json.loads(json.dumps(raw_info))
-        except Exception:
-            st.warning("⚠️ Yahoo rate limit reached — showing limited company info.")
+        try: fast_info = dict(t.fast_info)
+        except: fast_info = {}
+        try: info = t.get_info()
+        except: st.warning("⚠️ Yahoo rate limit reached — using limited data.")
+        df = t.history(period=period_choice, interval=interval_choice)
     except Exception as e:
-        st.error(f"Error fetching ticker data: {e}")
-    return info or {}, fast_info or {}
+        st.error(f"Failed to fetch data: {e}")
 
-@st.cache_data(ttl=3600)
-def get_history(ticker, period="1y", interval="1d"):
-    """Fetch historical price data."""
+    # Fallback fundamentals using Finnhub
+    fundamentals = {}
     try:
-        df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        df.dropna(inplace=True)
-        return df
-    except Exception:
-        return pd.DataFrame()
+        FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"
+        r = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}")
+        if r.status_code==200:
+            m = r.json().get("metric",{})
+            fundamentals["marketCap"] = m.get("marketCapitalization") or fast_info.get("market_cap")
+            fundamentals["peRatio"] = m.get("peBasicExclExtraTTM") or info.get("trailingPE")
+            fundamentals["eps"] = m.get("epsExclExtraItemsTTM") or info.get("trailingEps")
+            fundamentals["dividendYield"] = m.get("dividendsPerShareTTM") / m.get("price",1) if m.get("dividendsPerShareTTM") else None
+    except: pass
 
+    # Company profile fallback
+    name = info.get("shortName") or info.get("longName") or ticker
+    sector = info.get("sector")
+    industry = info.get("industry")
+    website = info.get("website")
+    logo = info.get("logo_url") or info.get("logo")
+    if not logo and website:
+        domain = website.replace("http://","").replace("https://","").split("/")[0]
+        logo = f"https://logo.clearbit.com/{domain}"
+    company = {"name":name,"sector":sector,"industry":industry,"website":website,"logo":logo}
+
+    return df, company, fundamentals
+
+# -----------------------------
+# TECHNICAL INDICATORS
+# -----------------------------
 def compute_indicators(df):
-    """Compute SMA, EMA, MACD, RSI."""
     if df.empty: return df
     df = df.copy()
     if 'Close' not in df: return df
-    close = df['Close']
-    if isinstance(close, pd.DataFrame): close = close.iloc[:,0]
-    close = close.dropna()
+    close = df['Close'].dropna()
     try:
         df['SMA_20'] = SMAIndicator(close, window=20).sma_indicator()
         df['SMA_50'] = SMAIndicator(close, window=50).sma_indicator()
@@ -69,27 +93,26 @@ def compute_indicators(df):
         df['MACD'] = macd.macd()
         df['MACD_SIGNAL'] = macd.macd_signal()
         df['RSI_14'] = RSIIndicator(close).rsi()
-    except Exception:
-        pass
+    except: pass
     df.dropna(inplace=True)
     return df
 
 def compute_signal(df):
     if df.empty or len(df)<2: return "No data"
     latest, prev = df.iloc[-1], df.iloc[-2]
-    macd_up = prev['MACD'] < prev['MACD_SIGNAL'] and latest['MACD'] > latest['MACD_SIGNAL']
-    macd_down = prev['MACD'] > prev['MACD_SIGNAL'] and latest['MACD'] < latest['MACD_SIGNAL']
-    price_above = latest['Close'] > latest.get('SMA_50', latest['Close'])
-    price_below = latest['Close'] < latest.get('SMA_50', latest['Close'])
+    macd_up = prev['MACD']<prev['MACD_SIGNAL'] and latest['MACD']>latest['MACD_SIGNAL']
+    macd_down = prev['MACD']>prev['MACD_SIGNAL'] and latest['MACD']<latest['MACD_SIGNAL']
+    price_above = latest['Close']>latest.get('SMA_50', latest['Close'])
+    price_below = latest['Close']<latest.get('SMA_50', latest['Close'])
     rsi = latest.get('RSI_14',50)
-    if macd_up and rsi < 70 and price_above: return "BUY"
-    if macd_down and rsi > 30 and price_below: return "SELL"
+    if macd_up and rsi<70 and price_above: return "BUY"
+    if macd_down and rsi>30 and price_below: return "SELL"
     return "HOLD"
 
 # -----------------------------
 # CHART
 # -----------------------------
-def build_plot(df, chart_type="candlestick", show_ma=True, show_volume=True):
+def build_chart(df, chart_type="candlestick"):
     if df.empty: return go.Figure()
     fig = go.Figure()
     if chart_type=="candlestick":
@@ -97,82 +120,78 @@ def build_plot(df, chart_type="candlestick", show_ma=True, show_volume=True):
                                      increasing_line_color="#26a69a", decreasing_line_color="#ef5350", name="Price"))
     elif chart_type=="line":
         fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode="lines", name="Close", line=dict(color="#42a5f5", width=2)))
-    elif chart_type=="bar":
-        fig.add_trace(go.Bar(x=df.index, y=df['Close'], name="Close", marker_color="#42a5f5"))
-    # MA
-    if show_ma:
-        if 'SMA_20' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode="lines", name="SMA 20", line=dict(color="orange", width=1.5)))
-        if 'SMA_50' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode="lines", name="SMA 50", line=dict(color="purple", width=1.5)))
-    # Signals
-    buy,sell=[],[]
-    if all(c in df.columns for c in ['MACD','MACD_SIGNAL','RSI_14','SMA_50']):
-        for i in range(1,len(df)):
-            prev,curr=df.iloc[i-1],df.iloc[i]
-            macd_up=prev['MACD']<prev['MACD_SIGNAL'] and curr['MACD']>curr['MACD_SIGNAL']
-            macd_down=prev['MACD']>prev['MACD_SIGNAL'] and curr['MACD']<curr['MACD_SIGNAL']
-            price_above=curr['Close']>curr['SMA_50']
-            price_below=curr['Close']<curr['SMA_50']
-            rsi=curr['RSI_14']
-            if macd_up and rsi<70 and price_above: buy.append((df.index[i], curr['Low']*0.98))
-            elif macd_down and rsi>30 and price_below: sell.append((df.index[i], curr['High']*1.02))
-    if buy: fig.add_trace(go.Scatter(x=[x[0] for x in buy], y=[x[1] for x in buy], mode="markers", name="BUY", marker=dict(symbol="triangle-up", color="lime", size=12)))
-    if sell: fig.add_trace(go.Scatter(x=[x[0] for x in sell], y=[x[1] for x in sell], mode="markers", name="SELL", marker=dict(symbol="triangle-down", color="red", size=12)))
-    if show_volume and 'Volume' in df:
-        fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name="Volume", marker_color="rgba(100,149,237,0.4)", yaxis='y2'))
-        fig.update_layout(yaxis=dict(domain=[0.25,1], title="Price"), yaxis2=dict(domain=[0,0.2], title="Volume", showgrid=False))
-    else: fig.update_layout(yaxis=dict(title="Price"))
-    fig.update_layout(template="plotly_dark", height=700, margin=dict(l=10,r=10,t=40,b=10), hovermode="x unified",
-                      plot_bgcolor="#0e1117", paper_bgcolor="#0e1117", font=dict(color="white"), xaxis_rangeslider_visible=False,
-                      legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5))
+    # Moving averages
+    if 'SMA_20' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode="lines", name="SMA 20", line=dict(color="orange")))
+    if 'SMA_50' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode="lines", name="SMA 50", line=dict(color="purple")))
+    fig.update_layout(template="plotly_dark", height=600, hovermode="x unified")
     return fig
 
 # -----------------------------
-# FUNDAMENTALS FALLBACK
+# NEWS SENTIMENT USING AI
 # -----------------------------
-@st.cache_data(ttl=43200)
-def fetch_fundamentals_fallback(ticker):
-    data={}
+def analyze_news_sentiment(ticker):
+    query = f"Summarize latest news and sentiment for {ticker}."
     try:
-        FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"  # free token fallback
-        r = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}")
-        if r.status_code==200:
-            m=r.json().get("metric",{})
-            data["marketCap"]=m.get("marketCapitalization")
-            data["peRatio"]=m.get("peBasicExclExtraTTM")
-            data["eps"]=m.get("epsExclExtraItemsTTM")
-            data["dividendYield"]=m.get("dividendsPerShareTTM")/m.get("price",1) if m.get("dividendsPerShareTTM") else None
-    except Exception:
-        pass
-    return data
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":query}],
+            max_tokens=300,
+            temperature=0.3
+        )
+        return response['choices'][0]['message']['content']
+    except:
+        return "AI News sentiment unavailable."
 
 # -----------------------------
-# COMPANY INFO FALLBACK
+# FETCH DATA
 # -----------------------------
-@st.cache_data(ttl=43200)
-def get_company_info_fallback(ticker, info_dict):
-    name=info_dict.get("shortName") or info_dict.get("longName") or ticker
-    sector=info_dict.get("sector")
-    industry=info_dict.get("industry")
-    website=info_dict.get("website")
-    logo=info_dict.get("logo_url") or info_dict.get("logo")
-    if not logo and website:
-        try:
-            domain=website.replace("http://","").replace("https://","").split("/")[0]
-            logo=f"https://logo.clearbit.com/{domain}"
-        except: pass
-    return {"name":name,"sector":sector,"industry":industry,"website":website,"logo":logo}
+df, company, fundamentals = fetch_ticker_data(ticker_input)
+df = compute_indicators(df)
+signal = compute_signal(df)
 
 # -----------------------------
-# SIDEBAR & INPUT
+# DASHBOARD UI
 # -----------------------------
-st.sidebar.header("Search & Settings")
-ticker_input = st.sidebar.text_input("Ticker (e.g. AAPL, MSFT, TSLA)", "AAPL").upper()
-period_choice = st.sidebar.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
-interval_choice = st.sidebar.selectbox("Interval", ["1d", "1wk", "1mo"], index=0)
-chart_type = st.sidebar.selectbox("Chart type", ["candlestick", "line", "bar"])
-show_ma = st.sidebar.checkbox("Show moving averages", True)
-show_indicators = st.sidebar.checkbox("Show indicators (RSI, MACD)", True)
+col1,col2 = st.columns([4,1])
+with col1:
+    st.subheader(f"{company['name']} ({ticker_input})")
+    subinfo = [x for x in [company['sector'], company['industry']] if x]
+    if subinfo: st.caption(" · ".join(subinfo))
+with col2:
+    if company['logo']: st.image(company['logo'], width=80)
 
-# AI Section
-st.sidebar.header("AI Assistant (optional)")
-use_ai = st.sidebar.checkbox("Enable AI agent")
+st.markdown("---")
+left,right = st.columns([3,1])
+
+with left:
+    if df.empty: st.error("No price data available")
+    else: st.plotly_chart(build_chart(df, chart_type), use_container_width=True)
+    if show_indicators and not df.empty:
+        st.write("### RSI & MACD")
+        rsi_fig = go.Figure(); rsi_fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name="RSI (14)")); st.plotly_chart(rsi_fig)
+        macd_fig = go.Figure(); macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD")); macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD_SIGNAL'], name="Signal")); st.plotly_chart(macd_fig)
+
+with right:
+    st.subheader("Fundamentals")
+    st.write(f"**Market Cap:** {fundamentals.get('marketCap','N/A')}")
+    st.write(f"**P/E:** {fundamentals.get('peRatio','N/A')}")
+    st.write(f"**EPS:** {fundamentals.get('eps','N/A')}")
+    st.write(f"**Dividend Yield:** {fundamentals.get('dividendYield','N/A')}")
+    if company.get("website"): st.markdown(f"[Website]({company['website']})")
+    st.subheader("Signal")
+    if signal=="BUY": st.success("BUY — bullish")
+    elif signal=="SELL": st.error("SELL — bearish")
+    elif signal=="HOLD": st.info("HOLD — neutral")
+    else: st.write(signal)
+
+# -----------------------------
+# AI NEWS SENTIMENT
+# -----------------------------
+if use_ai:
+    st.markdown("---")
+    st.header("🤖 AI News Sentiment")
+    sentiment = analyze_news_sentiment(ticker_input)
+    st.write(sentiment)
+
+st.markdown("---")
+st.caption("Data via Yahoo Finance & Finnhub, logos via Clearbit, AI powered sentiment. Not financial advice.")
