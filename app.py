@@ -7,14 +7,11 @@ from ta.trend import SMAIndicator, EMAIndicator, MACD
 from ta.momentum import RSIIndicator
 import requests, os, json
 import openai
-from datetime import datetime
 
 # -----------------------------
 # SETUP
 # -----------------------------
 st.set_page_config(layout="wide", page_title="Pro Stock Analyzer")
-
-# Use your API key
 os.environ["OPENAI_API_KEY"] = "sk-abcdef1234567890abcdef1234567890abcdef12"
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
@@ -33,48 +30,43 @@ st.sidebar.header("AI Assistant")
 use_ai = st.sidebar.checkbox("Enable AI Stock Assistant")
 
 # -----------------------------
-# FETCH DATA FUNCTIONS
+# FETCH DATA FUNCTION
 # -----------------------------
-@st.cache_data(ttl=43200)
-def fetch_ticker_data(ticker):
-    """Fetch company info, fundamentals, historical data safely."""
-    # Yahoo Finance
-    info, fast_info = {}, {}
-    df = pd.DataFrame()
+@st.cache_data(ttl=3600)
+def fetch_stock_data(ticker):
+    # Historical prices from Yahoo
     try:
-        t = yf.Ticker(ticker)
-        try: fast_info = dict(t.fast_info)
-        except: fast_info = {}
-        try: info = t.get_info()
-        except: st.warning("⚠️ Yahoo rate limit reached — using limited data.")
-        df = t.history(period=period_choice, interval=interval_choice)
-    except Exception as e:
-        st.error(f"Failed to fetch data: {e}")
-
-    # Fallback fundamentals using Finnhub
+        df = yf.download(ticker, period="1y", interval="1d", auto_adjust=True, progress=False)
+        df.dropna(inplace=True)
+    except:
+        df = pd.DataFrame()
+    # Company info and fundamentals from Finnhub
+    FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"
+    company = {}
     fundamentals = {}
     try:
-        FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"
-        r = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}")
-        if r.status_code==200:
-            m = r.json().get("metric",{})
-            fundamentals["marketCap"] = m.get("marketCapitalization") or fast_info.get("market_cap")
-            fundamentals["peRatio"] = m.get("peBasicExclExtraTTM") or info.get("trailingPE")
-            fundamentals["eps"] = m.get("epsExclExtraItemsTTM") or info.get("trailingEps")
-            fundamentals["dividendYield"] = m.get("dividendsPerShareTTM") / m.get("price",1) if m.get("dividendsPerShareTTM") else None
-    except: pass
-
-    # Company profile fallback
-    name = info.get("shortName") or info.get("longName") or ticker
-    sector = info.get("sector")
-    industry = info.get("industry")
-    website = info.get("website")
-    logo = info.get("logo_url") or info.get("logo")
-    if not logo and website:
-        domain = website.replace("http://","").replace("https://","").split("/")[0]
-        logo = f"https://logo.clearbit.com/{domain}"
-    company = {"name":name,"sector":sector,"industry":industry,"website":website,"logo":logo}
-
+        profile_r = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={FINNHUB_TOKEN}")
+        profile = profile_r.json()
+        company = {
+            "name": profile.get("name") or ticker,
+            "sector": profile.get("finnhubIndustry"),
+            "industry": profile.get("industry"),
+            "website": profile.get("weburl"),
+            "logo": profile.get("logo")
+        }
+    except:
+        company = {"name": ticker}
+    try:
+        metrics_r = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}")
+        metrics = metrics_r.json().get("metric", {})
+        fundamentals = {
+            "marketCap": metrics.get("marketCapitalization"),
+            "peRatio": metrics.get("peBasicExclExtraTTM"),
+            "eps": metrics.get("epsExclExtraItemsTTM"),
+            "dividendYield": metrics.get("dividendsPerShareTTM") / metrics.get("price",1) if metrics.get("dividendsPerShareTTM") else None
+        }
+    except:
+        fundamentals = {}
     return df, company, fundamentals
 
 # -----------------------------
@@ -120,6 +112,8 @@ def build_chart(df, chart_type="candlestick"):
                                      increasing_line_color="#26a69a", decreasing_line_color="#ef5350", name="Price"))
     elif chart_type=="line":
         fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode="lines", name="Close", line=dict(color="#42a5f5", width=2)))
+    elif chart_type=="bar":
+        fig.add_trace(go.Bar(x=df.index, y=df['Close'], name="Close", marker_color="#42a5f5"))
     # Moving averages
     if 'SMA_20' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode="lines", name="SMA 20", line=dict(color="orange")))
     if 'SMA_50' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode="lines", name="SMA 50", line=dict(color="purple")))
@@ -127,7 +121,7 @@ def build_chart(df, chart_type="candlestick"):
     return fig
 
 # -----------------------------
-# NEWS SENTIMENT USING AI
+# AI NEWS SENTIMENT
 # -----------------------------
 def analyze_news_sentiment(ticker):
     query = f"Summarize latest news and sentiment for {ticker}."
@@ -145,64 +139,23 @@ def analyze_news_sentiment(ticker):
 # -----------------------------
 # FETCH DATA
 # -----------------------------
-@st.cache_data(ttl=3600)
-def fetch_stock_data(ticker):
-    """
-    Returns: historical dataframe, company profile, fundamentals
-    All from Finnhub + Yahoo only for OHLC historical data.
-    """
-    # -------------------
-    # Historical Prices (Yahoo)
-    # -------------------
-    try:
-        df = yf.download(ticker, period="1y", interval="1d", auto_adjust=True, progress=False)
-        df.dropna(inplace=True)
-    except:
-        df = pd.DataFrame()
-
-    # -------------------
-    # Company Info & Fundamentals (Finnhub)
-    # -------------------
-    FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"
-    company = {}
-    fundamentals = {}
-    try:
-        profile_r = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={FINNHUB_TOKEN}")
-        profile = profile_r.json()
-        company = {
-            "name": profile.get("name") or ticker,
-            "sector": profile.get("finnhubIndustry"),
-            "industry": profile.get("industry"),
-            "website": profile.get("weburl"),
-            "logo": profile.get("logo")
-        }
-    except:
-        company = {"name": ticker}
-
-    try:
-        metrics_r = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}")
-        metrics = metrics_r.json().get("metric", {})
-        fundamentals = {
-            "marketCap": metrics.get("marketCapitalization"),
-            "peRatio": metrics.get("peBasicExclExtraTTM"),
-            "eps": metrics.get("epsExclExtraItemsTTM"),
-            "dividendYield": metrics.get("dividendsPerShareTTM") / metrics.get("price",1) if metrics.get("dividendsPerShareTTM") else None
-        }
-    except:
-        fundamentals = {}
-
-    return df, company, fundamentals
+df, company, fundamentals = fetch_stock_data(ticker_input)
+df = compute_indicators(df)
+signal = compute_signal(df)
 
 # -----------------------------
 # DASHBOARD UI
 # -----------------------------
+st.title(f"📈 Pro Stock Analyzer — {ticker_input}")
+
+# Company Header
 col1,col2 = st.columns([4,1])
 with col1:
-    st.subheader(f"{company['name']} ({ticker_input})")
-    subinfo = [x for x in [company['sector'], company['industry']] if x]
+    st.subheader(f"{company.get('name', ticker_input)} ({ticker_input})")
+    subinfo = [x for x in [company.get('sector'), company.get('industry')] if x]
     if subinfo: st.caption(" · ".join(subinfo))
 with col2:
-    if company['logo']: st.image(company['logo'], width=80)
+    if company.get('logo'): st.image(company['logo'], width=80)
 
 st.markdown("---")
 left,right = st.columns([3,1])
