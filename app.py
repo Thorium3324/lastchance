@@ -145,9 +145,53 @@ def analyze_news_sentiment(ticker):
 # -----------------------------
 # FETCH DATA
 # -----------------------------
-df, company, fundamentals = fetch_ticker_data(ticker_input)
-df = compute_indicators(df)
-signal = compute_signal(df)
+@st.cache_data(ttl=3600)
+def fetch_stock_data(ticker):
+    """
+    Returns: historical dataframe, company profile, fundamentals
+    All from Finnhub + Yahoo only for OHLC historical data.
+    """
+    # -------------------
+    # Historical Prices (Yahoo)
+    # -------------------
+    try:
+        df = yf.download(ticker, period="1y", interval="1d", auto_adjust=True, progress=False)
+        df.dropna(inplace=True)
+    except:
+        df = pd.DataFrame()
+
+    # -------------------
+    # Company Info & Fundamentals (Finnhub)
+    # -------------------
+    FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"
+    company = {}
+    fundamentals = {}
+    try:
+        profile_r = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={FINNHUB_TOKEN}")
+        profile = profile_r.json()
+        company = {
+            "name": profile.get("name") or ticker,
+            "sector": profile.get("finnhubIndustry"),
+            "industry": profile.get("industry"),
+            "website": profile.get("weburl"),
+            "logo": profile.get("logo")
+        }
+    except:
+        company = {"name": ticker}
+
+    try:
+        metrics_r = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}")
+        metrics = metrics_r.json().get("metric", {})
+        fundamentals = {
+            "marketCap": metrics.get("marketCapitalization"),
+            "peRatio": metrics.get("peBasicExclExtraTTM"),
+            "eps": metrics.get("epsExclExtraItemsTTM"),
+            "dividendYield": metrics.get("dividendsPerShareTTM") / metrics.get("price",1) if metrics.get("dividendsPerShareTTM") else None
+        }
+    except:
+        fundamentals = {}
+
+    return df, company, fundamentals
 
 # -----------------------------
 # DASHBOARD UI
