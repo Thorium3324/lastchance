@@ -28,10 +28,35 @@ st.set_page_config(layout="wide", page_title="Stock Analyzer")
 
 # ----------------------
 # Helper functions
-# ----------------------
+@st.cache_data(ttl=600)
 def fetch_ticker(ticker):
+    """
+    Fetch basic ticker info safely without triggering rate limit.
+    Tries lightweight info first; falls back gracefully.
+    """
     t = yf.Ticker(ticker)
-    info = t.info if hasattr(t, "info") else {}
+    info = {}
+    try:
+        # Try fast_info (does not hit heavy endpoints)
+        fi = t.fast_info
+        info.update({
+            "shortName": ticker.upper(),
+            "longName": ticker.upper(),
+            "marketCap": fi.get("market_cap"),
+            "lastPrice": fi.get("last_price"),
+            "currency": fi.get("currency"),
+        })
+        # Try normal info but with fail-safe
+        try:
+            raw_info = t.get_info()
+            if raw_info:
+                info.update(raw_info)
+        except yf.YFRateLimitError:
+            st.warning("⚠️ Yahoo Finance rate limit reached — using cached/basic data only.")
+        except Exception:
+            pass
+    except Exception as e:
+        st.error(f"Error fetching ticker data: {e}")
     return t, info
 
 def get_history(ticker, period="1y", interval="1d"):
