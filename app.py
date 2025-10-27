@@ -100,4 +100,184 @@ def build_plot(df, chart_type="candlestick", show_ma=True):
     fig = go.Figure()
     if chart_type == "candlestick":
         fig.add_trace(go.Candlestick(
-            x=df.index, open=df['Open']()
+            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
+    elif chart_type == "line":
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', name='Close'))
+    elif chart_type == "bar":
+        fig.add_trace(go.Bar(x=df.index, y=df['Close'], name='Close'))
+
+    if show_ma:
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode='lines', name='SMA 20'))
+        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode='lines', name='SMA 50'))
+
+    fig.update_layout(xaxis_rangeslider_visible=False, height=600, margin=dict(l=10, r=10, t=30, b=20))
+    return fig
+
+
+@st.cache_data(ttl=3600)
+def get_company_info_fallback(ticker, info_dict):
+    """Fetch logo and industry using fallback APIs if Yahoo data missing."""
+    name = info_dict.get("shortName") or info_dict.get("longName") or ticker
+    sector = info_dict.get("sector")
+    industry = info_dict.get("industry")
+    website = info_dict.get("website")
+    logo_url = info_dict.get("logo_url") or info_dict.get("logo")
+
+    # Try Clearbit for logo
+    if not logo_url and website:
+        try:
+            domain = website.replace("http://", "").replace("https://", "").split("/")[0]
+            logo_url = f"https://logo.clearbit.com/{domain}"
+        except Exception:
+            pass
+
+    # If still missing, try Finnhub public endpoint (no key needed for basic profile)
+    if (not sector or not industry) and ticker.isalpha():
+        try:
+            r = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token=cd7v7iad3i8s1h8j7o30")
+            if r.status_code == 200:
+                data = r.json()
+                sector = sector or data.get("finnhubIndustry")
+                logo_url = logo_url or data.get("logo")
+                website = website or data.get("weburl")
+        except Exception:
+            pass
+
+    return {
+        "name": name,
+        "sector": sector,
+        "industry": industry,
+        "website": website,
+        "logo": logo_url,
+    }
+
+# -----------------------------------
+# UI
+# -----------------------------------
+st.title("📈 Stock Analyzer — Professional Stock Insights")
+st.sidebar.header("Search & Settings")
+
+ticker_input = st.sidebar.text_input("Ticker (e.g. AAPL, MSFT, TSLA)", value="AAPL").upper()
+period_choice = st.sidebar.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
+interval_choice = st.sidebar.selectbox("Interval", ["1d", "1wk", "1mo"], index=0)
+chart_type = st.sidebar.selectbox("Chart type", ["candlestick", "line", "bar"])
+show_ma = st.sidebar.checkbox("Show moving averages", True)
+show_indicators = st.sidebar.checkbox("Show indicators (RSI, MACD)", True)
+
+st.sidebar.header("AI Assistant (optional)")
+use_ai = st.sidebar.checkbox("Enable AI agent")
+openai_key_input = st.sidebar.text_input("OpenAI API key (optional)", type="password")
+if openai_key_input:
+    os.environ["OPENAI_API_KEY"] = openai_key_input
+
+# -----------------------------------
+# DATA FETCH
+# -----------------------------------
+info, fast_info = fetch_ticker(ticker_input)
+df = get_history(ticker_input, period_choice, interval_choice)
+df = compute_indicators(df)
+company = get_company_info_fallback(ticker_input, info)
+
+# -----------------------------------
+# DISPLAY HEADER
+# -----------------------------------
+col1, col2 = st.columns([4, 1])
+with col1:
+    st.subheader(f"{company['name']} ({ticker_input})")
+    subinfo = [x for x in [company['sector'], company['industry']] if x]
+    if subinfo:
+        st.caption(" · ".join(subinfo))
+with col2:
+    if company['logo']:
+        st.image(company['logo'], width=80)
+
+st.markdown("---")
+
+# -----------------------------------
+# CHARTS & FUNDAMENTALS
+# -----------------------------------
+left, right = st.columns([3, 1])
+
+with left:
+    if df.empty:
+        st.error("No price data found.")
+    else:
+        st.plotly_chart(build_plot(df, chart_type, show_ma), use_container_width=True)
+
+        if show_indicators:
+            # RSI chart
+            rsi_fig = go.Figure()
+            rsi_fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name="RSI (14)"))
+            rsi_fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(rsi_fig, use_container_width=True)
+
+            # MACD chart
+            macd_fig = go.Figure()
+            macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD"))
+            macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD_SIGNAL'], name="Signal"))
+            macd_fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10))
+            st.plotly_chart(macd_fig, use_container_width=True)
+
+with right:
+    st.subheader("Fundamentals")
+    st.write(f"**Market cap:** {info.get('marketCap') or fast_info.get('market_cap', 'N/A')}")
+    st.write(f"**P/E:** {info.get('trailingPE') or info.get('forwardPE', 'N/A')}")
+    st.write(f"**EPS:** {info.get('trailingEps') or info.get('epsTrailingTwelveMonths', 'N/A')}")
+    st.write(f"**Dividend yield:** {info.get('dividendYield', 'N/A')}")
+    if company["website"]:
+        st.markdown(f"[Website]({company['website']})")
+
+    st.subheader("Signal")
+    signal = compute_signal(df)
+    if signal == "BUY":
+        st.success("BUY — bullish conditions (heuristic)")
+    elif signal == "SELL":
+        st.error("SELL — bearish conditions (heuristic)")
+    elif signal == "HOLD":
+        st.info("HOLD — neutral conditions")
+    else:
+        st.write(signal)
+
+# -----------------------------------
+# AI ASSISTANT
+# -----------------------------------
+st.markdown("---")
+st.header("🤖 AI Stock Assistant")
+
+if use_ai:
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key:
+        st.warning("Please enter your OpenAI API key in the sidebar.")
+    else:
+        openai.api_key = openai_key
+        user_q = st.text_area("Ask the AI about this stock:", f"Summarize fundamentals and outlook for {ticker_input}.")
+        if st.button("Analyze with AI"):
+            with st.spinner("Thinking..."):
+                try:
+                    last_close = df['Close'].iloc[-1] if not df.empty else "N/A"
+                    prompt = f"""
+You are a financial analyst AI.
+TICKER: {ticker_input}
+COMPANY: {company['name']}
+LAST CLOSE: {last_close}
+SECTOR: {company.get('sector')}
+INDUSTRY: {company.get('industry')}
+MARKET CAP: {info.get('marketCap') or fast_info.get('market_cap')}
+
+Summarize the stock fundamentals, recent performance, and possible outlook.
+Mention key indicators (RSI, MACD, SMA) if available and end with 3 short follow-up research questions.
+"""
+                    response = openai.ChatCompletion.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role": "user", "content": prompt}],
+                        max_tokens=500,
+                        temperature=0.3,
+                    )
+                    st.markdown(response['choices'][0]['message']['content'])
+                except Exception as e:
+                    st.error(f"AI request failed: {e}")
+else:
+    st.info("Enable the AI assistant from the sidebar to analyze the selected stock.")
+
+st.markdown("---")
+st.caption("Data via Yahoo Finance (yfinance), logos via Clearbit/Finnhub. Educational use only — not financial advice.")
