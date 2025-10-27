@@ -66,17 +66,40 @@ def get_history(ticker, period="1y", interval="1d"):
 
 
 def compute_indicators(df):
-    """Add technical indicators."""
-    if df.empty:
-        return df
+    """Add safe technical indicators to DataFrame."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+
     df = df.copy()
-    df['SMA_20'] = SMAIndicator(df['Close'], window=20).sma_indicator()
-    df['SMA_50'] = SMAIndicator(df['Close'], window=50).sma_indicator()
-    df['EMA_20'] = EMAIndicator(df['Close'], window=20).ema_indicator()
-    macd = MACD(df['Close'])
-    df['MACD'] = macd.macd()
-    df['MACD_SIGNAL'] = macd.macd_signal()
-    df['RSI_14'] = RSIIndicator(df['Close']).rsi()
+
+    # Fix multi-level columns (happens when yfinance returns multiple tickers)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = [col[0] for col in df.columns]
+
+    # Ensure 'Close' is a 1D Series
+    if 'Close' not in df:
+        st.warning("No 'Close' column found in data.")
+        return df
+
+    close = df['Close']
+    if isinstance(close, pd.DataFrame):
+        close = close.iloc[:, 0]
+
+    # Drop NaNs to avoid ta errors
+    close = close.dropna()
+
+    try:
+        df['SMA_20'] = SMAIndicator(close, window=20).sma_indicator()
+        df['SMA_50'] = SMAIndicator(close, window=50).sma_indicator()
+        df['EMA_20'] = EMAIndicator(close, window=20).ema_indicator()
+        macd = MACD(close)
+        df['MACD'] = macd.macd()
+        df['MACD_SIGNAL'] = macd.macd_signal()
+        df['RSI_14'] = RSIIndicator(close).rsi()
+    except Exception as e:
+        st.warning(f"⚠️ Could not compute indicators: {e}")
+
+    df.dropna(inplace=True)
     return df
 
 
