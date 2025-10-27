@@ -221,4 +221,79 @@ company = get_company_info_fallback(ticker_input, info)
 # HEADER DISPLAY
 # -----------------------------
 col1, col2 = st.columns([4,1])
-with col1: st.subheader(f"{company}")
+with col1: st.subheader(f"{company['name']} ({ticker_input})"); subinfo = [x for x in [company['sector'], company['industry']] if x]; 
+if subinfo: st.caption(" · ".join(subinfo))
+with col2: 
+    if company['logo']: st.image(company['logo'], width=80)
+st.markdown("---")
+
+# -----------------------------
+# CHARTS & FUNDAMENTALS
+# -----------------------------
+left,right = st.columns([3,1])
+with left:
+    if df.empty: st.error("No price data found.")
+    else:
+        st.plotly_chart(build_plot(df, chart_type, show_ma), use_container_width=True)
+        if show_indicators:
+            # RSI
+            rsi_fig = go.Figure(); rsi_fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name="RSI (14)")); rsi_fig.update_layout(height=200, margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(rsi_fig, use_container_width=True)
+            # MACD
+            macd_fig = go.Figure(); macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD")); macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD_SIGNAL'], name="Signal")); macd_fig.update_layout(height=200, margin=dict(l=10,r=10,t=10,b=10))
+            st.plotly_chart(macd_fig, use_container_width=True)
+
+with right:
+    st.subheader("Fundamentals")
+    st.write(f"**Market cap:** {info.get('marketCap') or fast_info.get('market_cap','N/A')}")
+    st.write(f"**P/E:** {info.get('trailingPE') or info.get('forwardPE','N/A')}")
+    st.write(f"**EPS:** {info.get('trailingEps') or info.get('epsTrailingTwelveMonths','N/A')}")
+    st.write(f"**Dividend yield:** {info.get('dividendYield','N/A')}")
+    if company["website"]: st.markdown(f"[Website]({company['website']})")
+    st.subheader("Signal")
+    signal = compute_signal(df)
+    if signal=="BUY": st.success("BUY — bullish conditions")
+    elif signal=="SELL": st.error("SELL — bearish conditions")
+    elif signal=="HOLD": st.info("HOLD — neutral conditions")
+    else: st.write(signal)
+
+# -----------------------------
+# AI ASSISTANT
+# -----------------------------
+st.markdown("---"); st.header("🤖 AI Stock Assistant")
+if use_ai:
+    openai_key = os.getenv("OPENAI_API_KEY")
+    if not openai_key: st.warning("Please enter OpenAI API key in sidebar.")
+    else:
+        openai.api_key = openai_key
+        user_q = st.text_area("Ask AI about this stock:", f"Summarize fundamentals and outlook for {ticker_input}.")
+        if st.button("Analyze with AI"):
+            with st.spinner("Thinking..."):
+                try:
+                    last_close = df['Close'].iloc[-1] if not df.empty else "N/A"
+                    prompt = f"""
+You are a financial analyst AI.
+TICKER: {ticker_input}
+COMPANY: {company['name']}
+LAST CLOSE: {last_close}
+SECTOR: {company.get('sector')}
+INDUSTRY: {company.get('industry')}
+MARKET CAP: {info.get('marketCap') or fast_info.get('market_cap')}
+
+Summarize the stock fundamentals, recent performance, and possible outlook.
+Mention key indicators (RSI, MACD, SMA) if available and end with 3 short follow-up research questions.
+"""
+                    response = openai.ChatCompletion.create(
+                        model="gpt-4o-mini",
+                        messages=[{"role":"user","content":prompt}],
+                        max_tokens=500,
+                        temperature=0.3,
+                    )
+                    st.markdown(response['choices'][0]['message']['content'])
+                except Exception as e:
+                    st.error(f"AI request failed: {e}")
+else:
+    st.info("Enable AI assistant in sidebar to analyze stock.")
+
+st.markdown("---")
+st.caption("Data via Yahoo Finance, logos via Clearbit/Finnhub. Educational purposes only — not financial advice.")
