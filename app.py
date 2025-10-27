@@ -21,35 +21,20 @@ st.set_page_config(layout="wide", page_title="Stock Analyzer")
 # SAFE FETCHERS
 # -----------------------------------
 @st.cache_data(ttl=600)
-def fetch_ticker_safe(ticker: str):
-    """Fetch info safely and return only serializable dicts."""
-    info, fast_info = {}, {}
+@st.cache_data(ttl=43200)  # 12 hours
+def fetch_ticker_info(ticker):
+    t = yf.Ticker(ticker)
+    fast_info = {}
+    info = {}
     try:
-        t = yf.Ticker(ticker)
-
-        # Try light, serializable parts
-        try:
-            fi = t.fast_info
-            if fi:
-                fast_info = dict(fi)
-        except Exception:
-            pass
-
-        try:
-            raw_info = t.get_info()
-            if isinstance(raw_info, dict):
-                info = json.loads(json.dumps(raw_info))  # force serialization
-        except Exception as e:
-            msg = str(e).lower()
-            if "rate" in msg and "limit" in msg:
-                st.warning("⚠️ Yahoo rate limit reached — showing limited company info.")
-            else:
-                st.info("⚠️ Limited company data available.")
-    except Exception as e:
-        st.error(f"Error fetching ticker data: {e}")
-
-    # ensure always serializable
-    return info or {}, fast_info or {}
+        fast_info = dict(t.fast_info)
+    except Exception:
+        pass
+    try:
+        info = json.loads(json.dumps(t.get_info()))
+    except Exception:
+        st.warning("⚠️ Yahoo rate limit — showing limited info.")
+    return info, fast_info
 
 
 @st.cache_data(ttl=600)
