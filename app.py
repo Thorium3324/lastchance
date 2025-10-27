@@ -121,14 +121,16 @@ def compute_signal(df):
     return "HOLD"
 
 
-def build_plot(df, chart_type="candlestick", show_ma=True):
-    """Build interactive stock chart with buy/sell markers."""
+import plotly.graph_objects as go
+
+def build_plot(df, chart_type="candlestick", show_ma=True, show_volume=True):
+    """Build interactive stock chart with buy/sell markers and volume."""
     if df.empty:
         return go.Figure()
 
     fig = go.Figure()
 
-    # --- Main price chart ---
+    # --- Main Price Chart ---
     if chart_type == "candlestick":
         fig.add_trace(go.Candlestick(
             x=df.index,
@@ -143,12 +145,16 @@ def build_plot(df, chart_type="candlestick", show_ma=True):
     elif chart_type == "line":
         fig.add_trace(go.Scatter(
             x=df.index, y=df['Close'],
-            mode='lines', name='Close', line=dict(color='#42a5f5')
+            mode='lines', name='Close',
+            line=dict(color='#42a5f5', width=2)
         ))
     elif chart_type == "bar":
-        fig.add_trace(go.Bar(x=df.index, y=df['Close'], name='Close', marker_color='#42a5f5'))
+        fig.add_trace(go.Bar(
+            x=df.index, y=df['Close'],
+            name='Close', marker_color='#42a5f5'
+        ))
 
-    # --- Moving averages ---
+    # --- Moving Averages ---
     if show_ma:
         if 'SMA_20' in df:
             fig.add_trace(go.Scatter(
@@ -163,7 +169,7 @@ def build_plot(df, chart_type="candlestick", show_ma=True):
                 line=dict(width=1.5, color='purple')
             ))
 
-    # --- Buy/Sell markers ---
+    # --- Buy/Sell Signal Detection ---
     buy_signals, sell_signals = [], []
     if all(col in df.columns for col in ['MACD', 'MACD_SIGNAL', 'RSI_14', 'SMA_50']):
         for i in range(1, len(df)):
@@ -179,13 +185,14 @@ def build_plot(df, chart_type="candlestick", show_ma=True):
             elif macd_down and rsi > 30 and price_below:
                 sell_signals.append((df.index[i], curr['High'] * 1.02))
 
+    # --- Plot BUY/SELL Markers ---
     if buy_signals:
         fig.add_trace(go.Scatter(
             x=[x[0] for x in buy_signals],
             y=[x[1] for x in buy_signals],
             mode='markers',
             name='BUY Signal',
-            marker=dict(symbol='triangle-up', color='green', size=12)
+            marker=dict(symbol='triangle-up', color='lime', size=12)
         ))
 
     if sell_signals:
@@ -197,17 +204,43 @@ def build_plot(df, chart_type="candlestick", show_ma=True):
             marker=dict(symbol='triangle-down', color='red', size=12)
         ))
 
-    # --- Layout styling ---
+    # --- Volume Bars (below chart) ---
+    if show_volume and 'Volume' in df.columns:
+        fig.add_trace(go.Bar(
+            x=df.index,
+            y=df['Volume'],
+            name='Volume',
+            marker_color='rgba(100, 149, 237, 0.4)',
+            yaxis='y2'
+        ))
+
+        fig.update_layout(
+            yaxis=dict(
+                title='Price',
+                domain=[0.25, 1]  # top 75% for price
+            ),
+            yaxis2=dict(
+                title='Volume',
+                domain=[0, 0.2],  # bottom 20% for volume
+                showgrid=False
+            )
+        )
+    else:
+        fig.update_layout(yaxis=dict(title='Price'))
+
+    # --- Layout & Styling ---
     fig.update_layout(
         template='plotly_dark',
-        height=650,
-        xaxis_rangeslider_visible=False,
+        height=700,
         margin=dict(l=10, r=10, t=40, b=10),
         hovermode="x unified",
         plot_bgcolor="#0e1117",
         paper_bgcolor="#0e1117",
-        font=dict(color="white")
+        font=dict(color="white"),
+        xaxis_rangeslider_visible=False,
+        legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5)
     )
+
     return fig
 
 @st.cache_data(ttl=3600)
