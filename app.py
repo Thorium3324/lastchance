@@ -165,7 +165,14 @@ def get_company_info_fallback(ticker, info_dict):
 # -----------------------------
 # SIDEBAR & INPUT
 # -----------------------------
-st.title("📈 Stock Analyzer — Professional Dashboard")
 st.sidebar.header("Search & Settings")
-ticker_input = st.sidebar.text_input("Ticker", "AAPL").upper()
-period_choice = st.sidebar.selectbox("Period
+ticker_input = st.sidebar.text_input("Ticker (e.g. AAPL, MSFT, TSLA)", "AAPL").upper()
+period_choice = st.sidebar.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
+interval_choice = st.sidebar.selectbox("Interval", ["1d", "1wk", "1mo"], index=0)
+chart_type = st.sidebar.selectbox("Chart type", ["candlestick", "line", "bar"])
+show_ma = st.sidebar.checkbox("Show moving averages", True)
+show_indicators = st.sidebar.checkbox("Show indicators (RSI, MACD)", True)
+
+# AI Section
+st.sidebar.header("AI Assistant (optional)")
+use_ai = st.sidebar.checkbox("Enable AI agent")
