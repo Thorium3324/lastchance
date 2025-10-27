@@ -90,17 +90,28 @@ def compute_indicators(df):
     return df
 
 def compute_signal(df):
-    if df.empty or len(df)<2: return "No data"
-    latest, prev = df.iloc[-1], df.iloc[-2]
-    macd_up = prev['MACD']<prev['MACD_SIGNAL'] and latest['MACD']>latest['MACD_SIGNAL']
-    macd_down = prev['MACD']>prev['MACD_SIGNAL'] and latest['MACD']<latest['MACD_SIGNAL']
-    price_above = latest['Close']>latest.get('SMA_50', latest['Close'])
-    price_below = latest['Close']<latest.get('SMA_50', latest['Close'])
-    rsi = latest.get('RSI_14',50)
-    if macd_up and rsi<70 and price_above: return "BUY"
-    if macd_down and rsi>30 and price_below: return "SELL"
-    return "HOLD"
+    """Safe rule-based signal computation."""
+    if df.empty or len(df)<2:
+        return "No data"
 
+    required_cols = ['MACD', 'MACD_SIGNAL', 'SMA_50', 'RSI_14', 'Close']
+    for col in required_cols:
+        if col not in df.columns:
+            return "No data"
+
+    latest, prev = df.iloc[-1], df.iloc[-2]
+
+    macd_up = prev['MACD'] < prev['MACD_SIGNAL'] and latest['MACD'] > latest['MACD_SIGNAL']
+    macd_down = prev['MACD'] > prev['MACD_SIGNAL'] and latest['MACD'] < latest['MACD_SIGNAL']
+    price_above = latest['Close'] > latest['SMA_50']
+    price_below = latest['Close'] < latest['SMA_50']
+    rsi = latest['RSI_14']
+
+    if macd_up and rsi < 70 and price_above:
+        return "BUY"
+    if macd_down and rsi > 30 and price_below:
+        return "SELL"
+    return "HOLD"
 # -----------------------------
 # CHART
 # -----------------------------
