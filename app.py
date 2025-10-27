@@ -20,8 +20,7 @@ st.set_page_config(layout="wide", page_title="Stock Analyzer")
 # -----------------------------------
 # SAFE FETCHERS
 # -----------------------------------
-@st.cache_data(ttl=600)
-@st.cache_data(ttl=43200)  # 12 hours
+@st.cache_data(ttl=43200)
 def fetch_ticker_info(ticker):
     t = yf.Ticker(ticker)
     fast_info = {}
@@ -35,7 +34,6 @@ def fetch_ticker_info(ticker):
     except Exception:
         st.warning("⚠️ Yahoo rate limit — showing limited info.")
     return info, fast_info
-
 
 @st.cache_data(ttl=600)
 def get_history(ticker, period="1y", interval="1d"):
