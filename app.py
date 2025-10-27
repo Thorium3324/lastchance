@@ -221,4 +221,4 @@ company = get_company_info_fallback(ticker_input, info)
 # HEADER DISPLAY
 # -----------------------------
 col1, col2 = st.columns([4,1])
-with col1: st.subheader(f"{company
+with col1: st.subheader(f"{company}")
