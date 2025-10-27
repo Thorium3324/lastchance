@@ -56,7 +56,8 @@ def fetch_ticker_safe(ticker: str):
 def get_history(ticker, period="1y", interval="1d"):
     """Fetch historical prices."""
     try:
-        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
+        df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
+
         if df is None or df.empty:
             return pd.DataFrame()
         df.dropna(inplace=True)
