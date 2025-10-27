@@ -132,7 +132,7 @@ def build_chart(df, chart_type="candlestick"):
     return fig
 
 # -----------------------------
-# AI STOCK ANALYSIS
+# AI STOCK ANALYSIS (Updated for OpenAI >=1.0.0)
 # -----------------------------
 def ai_stock_analysis(ticker, company, fundamentals, df):
     prompt = f"""
@@ -147,16 +147,18 @@ PRICE DATA AVAILABLE: {not df.empty}
 Provide a concise summary of the stock, recent performance, technical indicators (if available), and suggest BUY/HOLD/SELL reasoning.
 """
     try:
-        response = openai.ChatCompletion.create(
+        response = openai.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{"role":"user","content":prompt}],
+            messages=[
+                {"role": "system", "content": "You are a professional stock market assistant."},
+                {"role": "user", "content": prompt}
+            ],
             temperature=0.3,
             max_tokens=400
         )
-        return response['choices'][0]['message']['content']
+        return response.choices[0].message.content
     except Exception as e:
         return f"AI analysis unavailable: {e}"
-
 # -----------------------------
 # FETCH & COMPUTE
 # -----------------------------
