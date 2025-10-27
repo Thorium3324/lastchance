@@ -1,20 +1,25 @@
+# app.py
 import streamlit as st
 import yfinance as yf
 import pandas as pd
+import numpy as np
 import plotly.graph_objects as go
 from ta.trend import SMAIndicator, EMAIndicator, MACD
 from ta.momentum import RSIIndicator
-import requests, os, openai
+import requests, os
+import openai
 
 # -----------------------------
 # SETUP
 # -----------------------------
 st.set_page_config(layout="wide", page_title="Pro Stock Analyzer")
+
+# OpenAI API Key
 os.environ["OPENAI_API_KEY"] = "sk-abcdef1234567890abcdef1234567890abcdef12"
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # -----------------------------
-# SIDEBAR INPUTS
+# SIDEBAR INPUT
 # -----------------------------
 st.sidebar.header("Stock & Settings")
 ticker_input = st.sidebar.text_input("Ticker (AAPL, MSFT, TSLA)", "AAPL").upper()
@@ -32,35 +37,29 @@ use_ai = st.sidebar.checkbox("Enable AI Stock Assistant")
 # -----------------------------
 @st.cache_data(ttl=3600)
 def fetch_stock_data(ticker):
-    df = pd.DataFrame()
-    company, fundamentals = {}, {}
-    FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"
-
-    # Fetch historical data
+    """Fetch OHLC historical data, company info, and fundamentals"""
+    # Historical prices
     try:
         df = yf.download(ticker, period=period_choice, interval=interval_choice, auto_adjust=True, progress=False)
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        df.dropna(subset=["Close"], inplace=True)
+        df.dropna(inplace=True)
     except:
-        st.warning("⚠️ Failed to fetch historical data.")
-
-    # Finnhub profile
+        df = pd.DataFrame()
+    
+    # Company profile & fundamentals using Finnhub
+    FINNHUB_TOKEN = "cd7v7iad3i8s1h8j7o30"
+    company, fundamentals = {}, {}
     try:
-        profile = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={FINNHUB_TOKEN}").json()
+        profile_r = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token={FINNHUB_TOKEN}")
+        profile = profile_r.json()
         company = {
-            "name": profile.get("name", ticker),
+            "name": profile.get("name") or ticker,
             "sector": profile.get("finnhubIndustry"),
             "industry": profile.get("industry"),
             "website": profile.get("weburl"),
             "logo": profile.get("logo")
         }
-    except:
-        company = {"name": ticker}
-
-    # Finnhub metrics
-    try:
-        metrics = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}").json().get("metric", {})
+        metrics_r = requests.get(f"https://finnhub.io/api/v1/stock/metric?symbol={ticker}&metric=all&token={FINNHUB_TOKEN}")
+        metrics = metrics_r.json().get("metric", {})
         fundamentals = {
             "marketCap": metrics.get("marketCapitalization"),
             "peRatio": metrics.get("peBasicExclExtraTTM"),
@@ -68,49 +67,43 @@ def fetch_stock_data(ticker):
             "dividendYield": metrics.get("dividendsPerShareTTM") / metrics.get("price",1) if metrics.get("dividendsPerShareTTM") else None
         }
     except:
-        fundamentals = {}
-
+        company = {"name": ticker}
+    
     return df, company, fundamentals
 
 df, company, fundamentals = fetch_stock_data(ticker_input)
 
 # -----------------------------
-# COMPUTE INDICATORS
+# TECHNICAL INDICATORS
 # -----------------------------
 def compute_indicators(df):
-    if df.empty or "Close" not in df.columns:
-        return df
-    df = df.copy()
-    close = df["Close"]
+    if df.empty or 'Close' not in df: return df
+    close = df['Close'].dropna()
     try:
-        df["SMA_20"] = SMAIndicator(close, window=20, fillna=True).sma_indicator()
-        df["SMA_50"] = SMAIndicator(close, window=50, fillna=True).sma_indicator()
-        df["EMA_20"] = EMAIndicator(close, window=20, fillna=True).ema_indicator()
+        df['SMA_20'] = SMAIndicator(close, window=20).sma_indicator()
+        df['SMA_50'] = SMAIndicator(close, window=50).sma_indicator()
+        df['EMA_20'] = EMAIndicator(close, window=20).ema_indicator()
         macd = MACD(close)
-        df["MACD"] = macd.macd()
-        df["MACD_SIGNAL"] = macd.macd_signal()
-        df["RSI_14"] = RSIIndicator(close, fillna=True).rsi()
-    except Exception as e:
-        st.info("⚠️ Could not compute some indicators.")
+        df['MACD'] = macd.macd()
+        df['MACD_SIGNAL'] = macd.macd_signal()
+        df['RSI_14'] = RSIIndicator(close).rsi()
+    except:
+        st.warning("⚠️ Could not compute technical indicators.")
+    df.dropna(inplace=True)
     return df
 
 df = compute_indicators(df)
 
-# -----------------------------
-# COMPUTE SIGNAL
-# -----------------------------
 def compute_signal(df):
-    cols = ["MACD","MACD_SIGNAL","SMA_50","RSI_14","Close"]
-    if df.empty or not all(c in df.columns for c in cols) or len(df)<2:
-        return "No data"
+    if df.empty or len(df)<2: return "No data"
     latest, prev = df.iloc[-1], df.iloc[-2]
-    macd_up = prev["MACD"] < prev["MACD_SIGNAL"] and latest["MACD"] > latest["MACD_SIGNAL"]
-    macd_down = prev["MACD"] > prev["MACD_SIGNAL"] and latest["MACD"] < latest["MACD_SIGNAL"]
-    price_above = latest["Close"] > latest["SMA_50"]
-    price_below = latest["Close"] < latest["SMA_50"]
-    rsi = latest["RSI_14"]
-    if macd_up and rsi < 70 and price_above: return "BUY"
-    if macd_down and rsi > 30 and price_below: return "SELL"
+    macd_up = prev.get('MACD',0)<prev.get('MACD_SIGNAL',0) and latest.get('MACD',0)>latest.get('MACD_SIGNAL',0)
+    macd_down = prev.get('MACD',0)>prev.get('MACD_SIGNAL',0) and latest.get('MACD',0)<latest.get('MACD_SIGNAL',0)
+    price_above = latest['Close']>latest.get('SMA_50', latest['Close'])
+    price_below = latest['Close']<latest.get('SMA_50', latest['Close'])
+    rsi = latest.get('RSI_14',50)
+    if macd_up and rsi<70 and price_above: return "BUY"
+    if macd_down and rsi>30 and price_below: return "SELL"
     return "HOLD"
 
 signal = compute_signal(df)
@@ -118,62 +111,84 @@ signal = compute_signal(df)
 # -----------------------------
 # BUILD CHART
 # -----------------------------
-def build_chart(df, chart_type="candlestick", show_ma=True):
+def build_chart(df, chart_type="candlestick"):
     if df.empty: return go.Figure()
     fig = go.Figure()
     if chart_type=="candlestick":
-        fig.add_trace(go.Candlestick(x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+        fig.add_trace(go.Candlestick(x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'],
                                      increasing_line_color="#26a69a", decreasing_line_color="#ef5350", name="Price"))
     elif chart_type=="line":
-        fig.add_trace(go.Scatter(x=df.index, y=df["Close"], mode="lines", name="Close"))
+        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode="lines", name="Close", line=dict(color="#42a5f5", width=2)))
     elif chart_type=="bar":
-        fig.add_trace(go.Bar(x=df.index, y=df["Close"], name="Close"))
-
-    if show_ma:
-        for ma_col,color in [("SMA_20","orange"),("SMA_50","purple")]:
-            if ma_col in df.columns:
-                fig.add_trace(go.Scatter(x=df.index, y=df[ma_col], mode="lines", name=ma_col, line=dict(color=color)))
+        fig.add_trace(go.Bar(x=df.index, y=df['Close'], name="Close", marker_color="#42a5f5"))
+    
+    if 'SMA_20' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode="lines", name="SMA 20", line=dict(color="orange")))
+    if 'SMA_50' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode="lines", name="SMA 50", line=dict(color="purple")))
+    
     fig.update_layout(template="plotly_dark", height=600, hovermode="x unified")
     return fig
 
 # -----------------------------
-# AI NEWS SENTIMENT
+# AI STOCK ANALYSIS
 # -----------------------------
-def ai_news_sentiment(ticker):
-    query = f"Summarize latest news and sentiment for {ticker}."
+def ai_stock_analysis(ticker, company, fundamentals, df):
+    if df.empty: return "No data available for AI analysis."
+    last_close = df['Close'].iloc[-1]
+    latest_rsi = df['RSI_14'].iloc[-1] if 'RSI_14' in df.columns else 'N/A'
+    latest_macd = df['MACD'].iloc[-1] if 'MACD' in df.columns else 'N/A'
+    latest_signal = df['MACD_SIGNAL'].iloc[-1] if 'MACD_SIGNAL' in df.columns else 'N/A'
+
+    prompt = f"""
+You are a professional financial analyst AI. 
+Analyze the stock {ticker} ({company.get('name')}) using the following:
+
+- Last close: {last_close}
+- RSI: {latest_rsi}
+- MACD / Signal: {latest_macd} / {latest_signal}
+- Fundamentals: {fundamentals}
+- Sector: {company.get('sector')}
+- Industry: {company.get('industry')}
+
+Tasks:
+1. Predict short-term trend (next few days)
+2. Suggest Buy/Hold/Sell with reasoning
+3. Highlight key indicators
+4. Provide 3 follow-up research questions
+Answer concisely.
+"""
     try:
-        response = openai.ChatCompletion.create(model="gpt-4o-mini",
-                                                messages=[{"role":"user","content":query}],
-                                                max_tokens=300, temperature=0.3)
+        response = openai.ChatCompletion.create(
+            model="gpt-4o-mini",
+            messages=[{"role":"user","content":prompt}],
+            max_tokens=500,
+            temperature=0.3
+        )
         return response['choices'][0]['message']['content']
-    except:
-        return "AI news sentiment unavailable."
+    except Exception as e:
+        return f"AI analysis unavailable: {e}"
 
 # -----------------------------
-# DASHBOARD
+# DISPLAY DASHBOARD
 # -----------------------------
 col1, col2 = st.columns([4,1])
 with col1:
     st.subheader(f"{company.get('name', ticker_input)} ({ticker_input})")
-    subinfo = [x for x in [company.get("sector"), company.get("industry")] if x]
+    subinfo = [x for x in [company.get('sector'), company.get('industry')] if x]
     if subinfo: st.caption(" · ".join(subinfo))
 with col2:
-    if company.get("logo"): st.image(company["logo"], width=80)
+    if company.get('logo'): st.image(company['logo'], width=80)
 
 st.markdown("---")
-left,right = st.columns([3,1])
+left, right = st.columns([3,1])
 
 with left:
-    if df.empty:
-        st.error("No historical price data available.")
-    else:
-        st.plotly_chart(build_chart(df, chart_type, show_ma), use_container_width=True)
-
+    if df.empty: st.error("No price data available")
+    else: st.plotly_chart(build_chart(df, chart_type), use_container_width=True)
     if show_indicators and not df.empty:
-        if "RSI_14" in df.columns:
-            rsi_fig = go.Figure(); rsi_fig.add_trace(go.Scatter(x=df.index, y=df["RSI_14"], name="RSI (14)")); st.plotly_chart(rsi_fig)
-        if "MACD" in df.columns and "MACD_SIGNAL" in df.columns:
-            macd_fig = go.Figure(); macd_fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD")); macd_fig.add_trace(go.Scatter(x=df.index, y=df["MACD_SIGNAL"], name="Signal")); st.plotly_chart(macd_fig)
+        if 'RSI_14' in df.columns:
+            rsi_fig = go.Figure(); rsi_fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name="RSI (14)")); st.plotly_chart(rsi_fig)
+        if 'MACD' in df.columns:
+            macd_fig = go.Figure(); macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD")); macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD_SIGNAL'], name="Signal")); st.plotly_chart(macd_fig)
 
 with right:
     st.subheader("Fundamentals")
@@ -183,16 +198,17 @@ with right:
     st.write(f"**Dividend Yield:** {fundamentals.get('dividendYield','N/A')}")
     if company.get("website"): st.markdown(f"[Website]({company['website']})")
     st.subheader("Signal")
-    if signal=="BUY": st.success("BUY — bullish conditions")
-    elif signal=="SELL": st.error("SELL — bearish conditions")
-    elif signal=="HOLD": st.info("HOLD — neutral conditions")
+    if signal=="BUY": st.success("BUY — bullish")
+    elif signal=="SELL": st.error("SELL — bearish")
+    elif signal=="HOLD": st.info("HOLD — neutral")
     else: st.write(signal)
 
+# AI Section
 if use_ai:
     st.markdown("---")
-    st.header("🤖 AI News Sentiment")
-    sentiment = ai_news_sentiment(ticker_input)
-    st.write(sentiment)
+    st.header("🤖 AI Stock Analysis")
+    ai_result = ai_stock_analysis(ticker_input, company, fundamentals, df)
+    st.write(ai_result)
 
 st.markdown("---")
-st.caption("Data via Yahoo Finance & Finnhub, logos via Clearbit. AI news. Not financial advice.")
+st.caption("Data via Yahoo Finance & Finnhub, logos via Clearbit, AI analysis included. Not financial advice.")
