@@ -7,7 +7,6 @@ from ta.trend import SMAIndicator, EMAIndicator, MACD
 from ta.momentum import RSIIndicator
 import requests
 import os
-import json
 import openai
 
 # -----------------------------
@@ -15,12 +14,12 @@ import openai
 # -----------------------------
 st.set_page_config(layout="wide", page_title="Pro Stock Analyzer")
 
-# Your OpenAI API key
+# --- OpenAI API key ---
 os.environ["OPENAI_API_KEY"] = "sk-1234567890abcdef1234567890abcdef12345678"
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # -----------------------------
-# SIDEBAR
+# SIDEBAR INPUT
 # -----------------------------
 st.sidebar.header("Stock & Settings")
 ticker_input = st.sidebar.text_input("Ticker (AAPL, MSFT, TSLA)", "AAPL").upper()
@@ -41,6 +40,7 @@ def fetch_stock_data(ticker):
     df = pd.DataFrame()
     company = {}
     fundamentals = {}
+
     # --- Yahoo historical prices ---
     try:
         df = yf.download(ticker, period=period_choice, interval=interval_choice, auto_adjust=True, progress=False)
@@ -102,8 +102,11 @@ def compute_indicators(df):
 def compute_signal(df):
     if df.empty or len(df)<2: return "No data"
     latest, prev = df.iloc[-1], df.iloc[-2]
-    macd_up = 'MACD' in df.columns and prev['MACD']<prev['MACD_SIGNAL'] and latest['MACD']>latest['MACD_SIGNAL']
-    macd_down = 'MACD' in df.columns and prev['MACD']>prev['MACD_SIGNAL'] and latest['MACD']<latest['MACD_SIGNAL']
+    if 'MACD' in df.columns:
+        macd_up = prev['MACD']<prev['MACD_SIGNAL'] and latest['MACD']>latest['MACD_SIGNAL']
+        macd_down = prev['MACD']>prev['MACD_SIGNAL'] and latest['MACD']<latest['MACD_SIGNAL']
+    else:
+        macd_up = macd_down = False
     price_above = latest['Close']>latest.get('SMA_50', latest['Close'])
     price_below = latest['Close']<latest.get('SMA_50', latest['Close'])
     rsi = latest.get('RSI_14',50)
@@ -141,16 +144,16 @@ INDUSTRY: {company.get('industry')}
 MARKET CAP: {fundamentals.get('marketCap','N/A')}
 PRICE DATA AVAILABLE: {not df.empty}
 
-Provide a summary of the stock, recent performance, technical indicators (if available), and suggest BUY/HOLD/SELL reasoning.
+Provide a concise summary of the stock, recent performance, technical indicators (if available), and suggest BUY/HOLD/SELL reasoning.
 """
     try:
-        response = openai.chat.completions.create(
+        response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[{"role":"user","content":prompt}],
             temperature=0.3,
             max_tokens=400
         )
-        return response.choices[0].message.content
+        return response['choices'][0]['message']['content']
     except Exception as e:
         return f"AI analysis unavailable: {e}"
 
