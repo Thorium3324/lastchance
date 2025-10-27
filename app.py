@@ -15,7 +15,7 @@ import openai
 st.set_page_config(layout="wide", page_title="Pro Stock Analyzer")
 
 # --- OpenAI API key ---
-os.environ["OPENAI_API_KEY"] = "sk-1234567890abcdef1234567890abcdef12345678"
+os.environ["OPENAI_API_KEY"] = "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"
 openai.api_key = os.getenv("OPENAI_API_KEY")
 
 # -----------------------------
