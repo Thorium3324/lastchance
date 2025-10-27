@@ -1,412 +1,202 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-import numpy as np
 import plotly.graph_objects as go
 from ta.trend import SMAIndicator, EMAIndicator, MACD
 from ta.momentum import RSIIndicator
-import requests
-import os
-from dotenv import load_dotenv
-import openai
-import json
+from datetime import date, timedelta
 
-# -----------------------------------
-# SETUP
-# -----------------------------------
-load_dotenv()
-st.set_page_config(layout="wide", page_title="Stock Analyzer")
+st.set_page_config(
+    page_title="Pro Stock Insight",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# -----------------------------------
-# SAFE FETCHERS
-# -----------------------------------
-@st.cache_data(ttl=600)
-def fetch_ticker_safe(ticker: str):
-    """Fetch info safely and return only serializable dicts."""
-    info, fast_info = {}, {}
+# ==============================
+# ⚙️ Sidebar – User Controls
+# ==============================
+st.sidebar.header("📈 Stock Selector")
+ticker = st.sidebar.text_input("Enter stock ticker (e.g., AAPL, TSLA, NVDA):", "AAPL").upper()
+period = st.sidebar.selectbox("Time Period", ["1mo", "3mo", "6mo", "1y", "5y", "max"], index=3)
+interval = st.sidebar.selectbox("Interval", ["1d", "1h", "30m", "15m"], index=0)
+chart_type = st.sidebar.radio("Chart Type", ["candlestick", "line", "bar"], index=0)
+show_ma = st.sidebar.checkbox("Show Moving Averages", True)
+show_volume = st.sidebar.checkbox("Show Volume", True)
+show_indicators = st.sidebar.checkbox("Show RSI / MACD Panels", True)
+
+st.sidebar.markdown("---")
+st.sidebar.write("💡 *Built with Yahoo Finance, TA-Lib, and AI analytics (coming soon).*")
+
+# ==============================
+# 📦 Fetch Data
+# ==============================
+@st.cache_data(show_spinner=False)
+def get_data(ticker, period, interval):
+    df = yf.download(ticker, period=period, interval=interval, auto_adjust=True, progress=False)
+    if df.empty:
+        st.error("No data found for this ticker.")
+    return df
+
+@st.cache_data(show_spinner=False)
+def get_info(ticker):
     try:
-        t = yf.Ticker(ticker)
-
-        # Try light, serializable parts
-        try:
-            fi = t.fast_info
-            if fi:
-                fast_info = dict(fi)
-        except Exception:
-            pass
-
-        try:
-            raw_info = t.get_info()
-            if isinstance(raw_info, dict):
-                info = json.loads(json.dumps(raw_info))  # force serialization
-        except Exception as e:
-            msg = str(e).lower()
-            if "rate" in msg and "limit" in msg:
-                st.warning("⚠️ Yahoo rate limit reached — showing limited company info.")
-            else:
-                st.info("⚠️ Limited company data available.")
-    except Exception as e:
-        st.error(f"Error fetching ticker data: {e}")
-
-    # ensure always serializable
-    return info or {}, fast_info or {}
-
-
-@st.cache_data(ttl=600)
-def get_history(ticker, period="1y", interval="1d"):
-    """Fetch historical prices."""
-    try:
-        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
-        if df is None or df.empty:
-            return pd.DataFrame()
-        df.dropna(inplace=True)
-        return df
+        info = yf.Ticker(ticker).info
     except Exception:
-        return pd.DataFrame()
+        info = {}
+    return info
 
+df = get_data(ticker, period, interval)
+info = get_info(ticker)
 
+# ==============================
+# 📊 Compute Indicators
+# ==============================
 def compute_indicators(df):
-    """Add safe technical indicators to DataFrame."""
     if df is None or df.empty:
         return pd.DataFrame()
-
     df = df.copy()
 
-    # Fix multi-level columns (happens when yfinance returns multiple tickers)
+    # Fix potential MultiIndex columns
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = [col[0] for col in df.columns]
+        df.columns = [c[0] for c in df.columns]
 
-    # Ensure 'Close' is a 1D Series
-    if 'Close' not in df:
-        st.warning("No 'Close' column found in data.")
-        return df
-
-    close = df['Close']
+    close = df["Close"]
     if isinstance(close, pd.DataFrame):
         close = close.iloc[:, 0]
-
-    # Drop NaNs to avoid ta errors
     close = close.dropna()
 
     try:
-        df['SMA_20'] = SMAIndicator(close, window=20).sma_indicator()
-        df['SMA_50'] = SMAIndicator(close, window=50).sma_indicator()
-        df['EMA_20'] = EMAIndicator(close, window=20).ema_indicator()
+        df["SMA_20"] = SMAIndicator(close, 20).sma_indicator()
+        df["SMA_50"] = SMAIndicator(close, 50).sma_indicator()
+        df["EMA_20"] = EMAIndicator(close, 20).ema_indicator()
         macd = MACD(close)
-        df['MACD'] = macd.macd()
-        df['MACD_SIGNAL'] = macd.macd_signal()
-        df['RSI_14'] = RSIIndicator(close).rsi()
+        df["MACD"] = macd.macd()
+        df["MACD_SIGNAL"] = macd.macd_signal()
+        df["MACD_HIST"] = macd.macd_diff()
+        df["RSI_14"] = RSIIndicator(close).rsi()
     except Exception as e:
-        st.warning(f"⚠️ Could not compute indicators: {e}")
+        st.warning(f"Indicator computation failed: {e}")
 
-    df.dropna(inplace=True)
-    return df
+    return df.dropna()
 
+df = compute_indicators(df)
 
-def compute_signal(df):
-    """Simple rule-based trading signal."""
-    if df.empty or len(df) < 3:
-        return "No data"
-    latest, prev = df.iloc[-1], df.iloc[-2]
-    macd_up = prev['MACD'] < prev['MACD_SIGNAL'] and latest['MACD'] > latest['MACD_SIGNAL']
-    macd_down = prev['MACD'] > prev['MACD_SIGNAL'] and latest['MACD'] < latest['MACD_SIGNAL']
-    price_above = latest['Close'] > latest.get('SMA_50', latest['Close'])
-    price_below = latest['Close'] < latest.get('SMA_50', latest['Close'])
-    rsi = latest.get('RSI_14', 50)
-
-    if macd_up and rsi < 70 and price_above:
-        return "BUY"
-    if macd_down and rsi > 30 and price_below:
-        return "SELL"
-    return "HOLD"
-
-
-import plotly.graph_objects as go
-
-def build_plot(df, chart_type="candlestick", show_ma=True, show_volume=True):
-    """Build interactive stock chart with buy/sell markers and volume."""
+# ==============================
+# 🎨 Main Chart with Volume + Buy/Sell
+# ==============================
+def build_chart(df):
     if df.empty:
         return go.Figure()
 
     fig = go.Figure()
 
-    # --- Main Price Chart ---
-    if chart_type == "candlestick":
-        fig.add_trace(go.Candlestick(
-            x=df.index,
-            open=df['Open'],
-            high=df['High'],
-            low=df['Low'],
-            close=df['Close'],
-            name='Price',
-            increasing_line_color='#26a69a',
-            decreasing_line_color='#ef5350'
-        ))
-    elif chart_type == "line":
-        fig.add_trace(go.Scatter(
-            x=df.index, y=df['Close'],
-            mode='lines', name='Close',
-            line=dict(color='#42a5f5', width=2)
-        ))
-    elif chart_type == "bar":
-        fig.add_trace(go.Bar(
-            x=df.index, y=df['Close'],
-            name='Close', marker_color='#42a5f5'
-        ))
+    # Main Price Chart
+    fig.add_trace(go.Candlestick(
+        x=df.index, open=df["Open"], high=df["High"], low=df["Low"], close=df["Close"],
+        name="Price", increasing_line_color="#26a69a", decreasing_line_color="#ef5350"
+    ))
 
-    # --- Moving Averages ---
+    # Moving Averages
     if show_ma:
-        if 'SMA_20' in df:
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['SMA_20'],
-                mode='lines', name='SMA 20',
-                line=dict(width=1.5, color='orange')
-            ))
-        if 'SMA_50' in df:
-            fig.add_trace(go.Scatter(
-                x=df.index, y=df['SMA_50'],
-                mode='lines', name='SMA 50',
-                line=dict(width=1.5, color='purple')
-            ))
+        if "SMA_20" in df:
+            fig.add_trace(go.Scatter(x=df.index, y=df["SMA_20"], mode="lines",
+                                     name="SMA 20", line=dict(width=1.2, color="orange")))
+        if "SMA_50" in df:
+            fig.add_trace(go.Scatter(x=df.index, y=df["SMA_50"], mode="lines",
+                                     name="SMA 50", line=dict(width=1.2, color="purple")))
 
-    # --- Buy/Sell Signal Detection ---
-    buy_signals, sell_signals = [], []
-    if all(col in df.columns for col in ['MACD', 'MACD_SIGNAL', 'RSI_14', 'SMA_50']):
-        for i in range(1, len(df)):
-            prev, curr = df.iloc[i - 1], df.iloc[i]
-            macd_up = prev['MACD'] < prev['MACD_SIGNAL'] and curr['MACD'] > curr['MACD_SIGNAL']
-            macd_down = prev['MACD'] > prev['MACD_SIGNAL'] and curr['MACD'] < curr['MACD_SIGNAL']
-            price_above = curr['Close'] > curr['SMA_50']
-            price_below = curr['Close'] < curr['SMA_50']
-            rsi = curr['RSI_14']
+    # Buy/Sell markers
+    buy, sell = [], []
+    for i in range(1, len(df)):
+        prev, curr = df.iloc[i - 1], df.iloc[i]
+        macd_up = prev["MACD"] < prev["MACD_SIGNAL"] and curr["MACD"] > curr["MACD_SIGNAL"]
+        macd_down = prev["MACD"] > prev["MACD_SIGNAL"] and curr["MACD"] < curr["MACD_SIGNAL"]
+        if macd_up and curr["RSI_14"] < 70:
+            buy.append((df.index[i], curr["Low"] * 0.98))
+        elif macd_down and curr["RSI_14"] > 30:
+            sell.append((df.index[i], curr["High"] * 1.02))
 
-            if macd_up and rsi < 70 and price_above:
-                buy_signals.append((df.index[i], curr['Low'] * 0.98))
-            elif macd_down and rsi > 30 and price_below:
-                sell_signals.append((df.index[i], curr['High'] * 1.02))
+    fig.add_trace(go.Scatter(x=[x[0] for x in buy], y=[x[1] for x in buy],
+                             mode="markers", name="BUY", marker=dict(symbol="triangle-up", color="lime", size=12)))
+    fig.add_trace(go.Scatter(x=[x[0] for x in sell], y=[x[1] for x in sell],
+                             mode="markers", name="SELL", marker=dict(symbol="triangle-down", color="red", size=12)))
 
-    # --- Plot BUY/SELL Markers ---
-    if buy_signals:
-        fig.add_trace(go.Scatter(
-            x=[x[0] for x in buy_signals],
-            y=[x[1] for x in buy_signals],
-            mode='markers',
-            name='BUY Signal',
-            marker=dict(symbol='triangle-up', color='lime', size=12)
-        ))
-
-    if sell_signals:
-        fig.add_trace(go.Scatter(
-            x=[x[0] for x in sell_signals],
-            y=[x[1] for x in sell_signals],
-            mode='markers',
-            name='SELL Signal',
-            marker=dict(symbol='triangle-down', color='red', size=12)
-        ))
-
-    # --- Volume Bars (below chart) ---
-    if show_volume and 'Volume' in df.columns:
-        fig.add_trace(go.Bar(
-            x=df.index,
-            y=df['Volume'],
-            name='Volume',
-            marker_color='rgba(100, 149, 237, 0.4)',
-            yaxis='y2'
-        ))
+    # Volume Bars
+    if show_volume and "Volume" in df:
+        fig.add_trace(go.Bar(x=df.index, y=df["Volume"], name="Volume",
+                             marker_color="rgba(100,149,237,0.4)", yaxis="y2"))
 
         fig.update_layout(
-            yaxis=dict(
-                title='Price',
-                domain=[0.25, 1]  # top 75% for price
-            ),
-            yaxis2=dict(
-                title='Volume',
-                domain=[0, 0.2],  # bottom 20% for volume
-                showgrid=False
-            )
+            yaxis=dict(domain=[0.25, 1], title="Price"),
+            yaxis2=dict(domain=[0, 0.2], title="Volume", showgrid=False)
         )
     else:
-        fig.update_layout(yaxis=dict(title='Price'))
+        fig.update_layout(yaxis=dict(title="Price"))
 
-    # --- Layout & Styling ---
     fig.update_layout(
-        template='plotly_dark',
-        height=700,
-        margin=dict(l=10, r=10, t=40, b=10),
-        hovermode="x unified",
-        plot_bgcolor="#0e1117",
-        paper_bgcolor="#0e1117",
+        template="plotly_dark", height=700, hovermode="x unified",
+        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
         font=dict(color="white"),
+        margin=dict(l=10, r=10, t=30, b=10),
         xaxis_rangeslider_visible=False,
         legend=dict(orientation="h", yanchor="bottom", y=-0.25, xanchor="center", x=0.5)
     )
 
     return fig
 
-@st.cache_data(ttl=3600)
-def get_company_info_fallback(ticker, info_dict):
-    """Fetch logo and industry using fallback APIs if Yahoo data missing."""
-    name = info_dict.get("shortName") or info_dict.get("longName") or ticker
-    sector = info_dict.get("sector")
-    industry = info_dict.get("industry")
-    website = info_dict.get("website")
-    logo_url = info_dict.get("logo_url") or info_dict.get("logo")
+# ==============================
+# 📉 RSI & MACD Panels
+# ==============================
+def indicator_panels(df):
+    if df.empty or not show_indicators:
+        return None
 
-    # Try Clearbit for logo
-    if not logo_url and website:
-        try:
-            domain = website.replace("http://", "").replace("https://", "").split("/")[0]
-            logo_url = f"https://logo.clearbit.com/{domain}"
-        except Exception:
-            pass
+    fig = go.Figure()
 
-    # Try Finnhub fallback
-    if (not sector or not industry) and ticker.isalpha():
-        try:
-            r = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token=cd7v7iad3i8s1h8j7o30")
-            if r.status_code == 200:
-                data = r.json()
-                sector = sector or data.get("finnhubIndustry")
-                logo_url = logo_url or data.get("logo")
-                website = website or data.get("weburl")
-        except Exception:
-            pass
+    # RSI
+    fig.add_trace(go.Scatter(x=df.index, y=df["RSI_14"], name="RSI (14)",
+                             line=dict(color="#42a5f5", width=2)))
+    fig.add_hrect(y0=70, y1=100, fillcolor="red", opacity=0.2, line_width=0)
+    fig.add_hrect(y0=0, y1=30, fillcolor="lime", opacity=0.2, line_width=0)
 
-    return {
-        "name": name,
-        "sector": sector,
-        "industry": industry,
-        "website": website,
-        "logo": logo_url,
-    }
+    # MACD
+    fig.add_trace(go.Bar(x=df.index, y=df["MACD_HIST"], name="MACD Histogram",
+                         marker_color="rgba(255,255,255,0.4)"))
+    fig.add_trace(go.Scatter(x=df.index, y=df["MACD"], name="MACD", line=dict(color="orange", width=1.5)))
+    fig.add_trace(go.Scatter(x=df.index, y=df["MACD_SIGNAL"], name="Signal", line=dict(color="purple", width=1.5)))
 
-# -----------------------------------
-# UI
-# -----------------------------------
-st.title("📈 Stock Analyzer — Professional Stock Insights")
-st.sidebar.header("Search & Settings")
+    fig.update_layout(
+        template="plotly_dark", height=400,
+        hovermode="x unified",
+        plot_bgcolor="#0e1117", paper_bgcolor="#0e1117",
+        font=dict(color="white"),
+        margin=dict(l=10, r=10, t=30, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=-0.3, xanchor="center", x=0.5)
+    )
 
-ticker_input = st.sidebar.text_input("Ticker (e.g. AAPL, MSFT, TSLA)", value="AAPL").upper()
-period_choice = st.sidebar.selectbox("Period", ["1mo", "3mo", "6mo", "1y", "2y", "5y", "max"], index=3)
-interval_choice = st.sidebar.selectbox("Interval", ["1d", "1wk", "1mo"], index=0)
-chart_type = st.sidebar.selectbox("Chart type", ["candlestick", "line", "bar"])
-show_ma = st.sidebar.checkbox("Show moving averages", True)
-show_indicators = st.sidebar.checkbox("Show indicators (RSI, MACD)", True)
+    return fig
 
-# AI Section
-st.sidebar.header("AI Assistant (optional)")
-use_ai = st.sidebar.checkbox("Enable AI agent")
-openai_key_input = st.sidebar.text_input("OpenAI API key (optional)", type="password")
-if openai_key_input:
-    os.environ["OPENAI_API_KEY"] = openai_key_input
+# ==============================
+# 🏢 Display Info + Charts
+# ==============================
+col1, col2 = st.columns([1, 3])
 
-# -----------------------------------
-# FETCH DATA
-# -----------------------------------
-info, fast_info = fetch_ticker_safe(ticker_input)
-df = get_history(ticker_input, period_choice, interval_choice)
-df = compute_indicators(df)
-company = get_company_info_fallback(ticker_input, info)
-
-# -----------------------------------
-# HEADER DISPLAY
-# -----------------------------------
-col1, col2 = st.columns([4, 1])
 with col1:
-    st.subheader(f"{company['name']} ({ticker_input})")
-    subinfo = [x for x in [company['sector'], company['industry']] if x]
-    if subinfo:
-        st.caption(" · ".join(subinfo))
+    st.markdown(f"## {info.get('longName', ticker)} ({ticker})")
+    if "logo_url" in info:
+        st.image(info["logo_url"], width=120)
+    st.markdown(f"**Sector:** {info.get('sector', 'N/A')}")
+    st.markdown(f"**Industry:** {info.get('industry', 'N/A')}")
+    st.markdown(f"**Market Cap:** {info.get('marketCap', 'N/A')}")
+    st.markdown(f"**Country:** {info.get('country', 'N/A')}")
+    st.markdown("---")
+    st.info("💬 AI Insight (coming soon): Personalized stock prediction & market news")
+
 with col2:
-    if company['logo']:
-        st.image(company['logo'], width=80)
+    st.plotly_chart(build_chart(df), use_container_width=True)
+    if show_indicators:
+        st.plotly_chart(indicator_panels(df), use_container_width=True)
 
 st.markdown("---")
-
-# -----------------------------------
-# CHARTS & FUNDAMENTALS
-# -----------------------------------
-left, right = st.columns([3, 1])
-with left:
-    if df.empty:
-        st.error("No price data found.")
-    else:
-        st.plotly_chart(build_plot(df, chart_type, show_ma), use_container_width=True)
-
-        if show_indicators:
-            # RSI chart
-            rsi_fig = go.Figure()
-            rsi_fig.add_trace(go.Scatter(x=df.index, y=df['RSI_14'], name="RSI (14)"))
-            rsi_fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(rsi_fig, use_container_width=True)
-
-            # MACD chart
-            macd_fig = go.Figure()
-            macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD'], name="MACD"))
-            macd_fig.add_trace(go.Scatter(x=df.index, y=df['MACD_SIGNAL'], name="Signal"))
-            macd_fig.update_layout(height=200, margin=dict(l=10, r=10, t=10, b=10))
-            st.plotly_chart(macd_fig, use_container_width=True)
-
-with right:
-    st.subheader("Fundamentals")
-    st.write(f"**Market cap:** {info.get('marketCap') or fast_info.get('market_cap', 'N/A')}")
-    st.write(f"**P/E:** {info.get('trailingPE') or info.get('forwardPE', 'N/A')}")
-    st.write(f"**EPS:** {info.get('trailingEps') or info.get('epsTrailingTwelveMonths', 'N/A')}")
-    st.write(f"**Dividend yield:** {info.get('dividendYield', 'N/A')}")
-    if company["website"]:
-        st.markdown(f"[Website]({company['website']})")
-
-    st.subheader("Signal")
-    signal = compute_signal(df)
-    if signal == "BUY":
-        st.success("BUY — bullish conditions (heuristic)")
-    elif signal == "SELL":
-        st.error("SELL — bearish conditions (heuristic)")
-    elif signal == "HOLD":
-        st.info("HOLD — neutral conditions")
-    else:
-        st.write(signal)
-
-# -----------------------------------
-# AI ASSISTANT
-# -----------------------------------
-st.markdown("---")
-st.header("🤖 AI Stock Assistant")
-
-if use_ai:
-    openai_key = os.getenv("OPENAI_API_KEY")
-    if not openai_key:
-        st.warning("Please enter your OpenAI API key in the sidebar.")
-    else:
-        openai.api_key = openai_key
-        user_q = st.text_area("Ask the AI about this stock:", f"Summarize fundamentals and outlook for {ticker_input}.")
-        if st.button("Analyze with AI"):
-            with st.spinner("Thinking..."):
-                try:
-                    last_close = df['Close'].iloc[-1] if not df.empty else "N/A"
-                    prompt = f"""
-You are a financial analyst AI.
-TICKER: {ticker_input}
-COMPANY: {company['name']}
-LAST CLOSE: {last_close}
-SECTOR: {company.get('sector')}
-INDUSTRY: {company.get('industry')}
-MARKET CAP: {info.get('marketCap') or fast_info.get('market_cap')}
-
-Summarize the stock fundamentals, recent performance, and possible outlook.
-Mention key indicators (RSI, MACD, SMA) if available and end with 3 short follow-up research questions.
-"""
-                    response = openai.ChatCompletion.create(
-                        model="gpt-4o-mini",
-                        messages=[{"role": "user", "content": prompt}],
-                        max_tokens=500,
-                        temperature=0.3,
-                    )
-                    st.markdown(response['choices'][0]['message']['content'])
-                except Exception as e:
-                    st.error(f"AI request failed: {e}")
-else:
-    st.info("Enable the AI assistant from the sidebar to analyze the selected stock.")
-
-st.markdown("---")
-st.caption("Data via Yahoo Finance, logos via Clearbit/Finnhub. Educational use only — not financial advice.")
+st.caption("⚙️ Data source: Yahoo Finance | Technicals: ta | Built with ❤️ using Streamlit & Plotly")
