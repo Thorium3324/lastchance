@@ -9,6 +9,7 @@ import requests
 import os
 from dotenv import load_dotenv
 import openai
+import json
 
 # -----------------------------------
 # SETUP
@@ -17,26 +18,27 @@ load_dotenv()
 st.set_page_config(layout="wide", page_title="Stock Analyzer")
 
 # -----------------------------------
-# HELPERS
+# SAFE FETCHERS
 # -----------------------------------
 @st.cache_data(ttl=600)
-def fetch_ticker(ticker: str):
-    """Fetch info safely, avoiding Yahoo rate limits."""
+def fetch_ticker_safe(ticker: str):
+    """Fetch info safely and return only serializable dicts."""
     info, fast_info = {}, {}
     try:
         t = yf.Ticker(ticker)
 
-        # Lightweight data (fast_info never triggers rate limits)
+        # Try light, serializable parts
         try:
-            fast_info = t.fast_info or {}
+            fi = t.fast_info
+            if fi:
+                fast_info = dict(fi)
         except Exception:
-            fast_info = {}
+            pass
 
-        # Heavier data (info)
         try:
             raw_info = t.get_info()
             if isinstance(raw_info, dict):
-                info.update(raw_info)
+                info = json.loads(json.dumps(raw_info))  # force serialization
         except Exception as e:
             msg = str(e).lower()
             if "rate" in msg and "limit" in msg:
@@ -46,15 +48,15 @@ def fetch_ticker(ticker: str):
     except Exception as e:
         st.error(f"Error fetching ticker data: {e}")
 
-    return info, fast_info
+    # ensure always serializable
+    return info or {}, fast_info or {}
 
 
 @st.cache_data(ttl=600)
 def get_history(ticker, period="1y", interval="1d"):
     """Fetch historical prices."""
     try:
-        t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval, auto_adjust=False)
+        df = yf.download(ticker, period=period, interval=interval, auto_adjust=False)
         if df is None or df.empty:
             return pd.DataFrame()
         df.dropna(inplace=True)
@@ -107,8 +109,8 @@ def build_plot(df, chart_type="candlestick", show_ma=True):
         fig.add_trace(go.Bar(x=df.index, y=df['Close'], name='Close'))
 
     if show_ma:
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode='lines', name='SMA 20'))
-        fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode='lines', name='SMA 50'))
+        if 'SMA_20' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode='lines', name='SMA 20'))
+        if 'SMA_50' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode='lines', name='SMA 50'))
 
     fig.update_layout(xaxis_rangeslider_visible=False, height=600, margin=dict(l=10, r=10, t=30, b=20))
     return fig
@@ -131,7 +133,7 @@ def get_company_info_fallback(ticker, info_dict):
         except Exception:
             pass
 
-    # If still missing, try Finnhub public endpoint (no key needed for basic profile)
+    # Try Finnhub fallback
     if (not sector or not industry) and ticker.isalpha():
         try:
             r = requests.get(f"https://finnhub.io/api/v1/stock/profile2?symbol={ticker}&token=cd7v7iad3i8s1h8j7o30")
@@ -164,6 +166,7 @@ chart_type = st.sidebar.selectbox("Chart type", ["candlestick", "line", "bar"])
 show_ma = st.sidebar.checkbox("Show moving averages", True)
 show_indicators = st.sidebar.checkbox("Show indicators (RSI, MACD)", True)
 
+# AI Section
 st.sidebar.header("AI Assistant (optional)")
 use_ai = st.sidebar.checkbox("Enable AI agent")
 openai_key_input = st.sidebar.text_input("OpenAI API key (optional)", type="password")
@@ -171,15 +174,15 @@ if openai_key_input:
     os.environ["OPENAI_API_KEY"] = openai_key_input
 
 # -----------------------------------
-# DATA FETCH
+# FETCH DATA
 # -----------------------------------
-info, fast_info = fetch_ticker(ticker_input)
+info, fast_info = fetch_ticker_safe(ticker_input)
 df = get_history(ticker_input, period_choice, interval_choice)
 df = compute_indicators(df)
 company = get_company_info_fallback(ticker_input, info)
 
 # -----------------------------------
-# DISPLAY HEADER
+# HEADER DISPLAY
 # -----------------------------------
 col1, col2 = st.columns([4, 1])
 with col1:
@@ -197,7 +200,6 @@ st.markdown("---")
 # CHARTS & FUNDAMENTALS
 # -----------------------------------
 left, right = st.columns([3, 1])
-
 with left:
     if df.empty:
         st.error("No price data found.")
@@ -280,4 +282,4 @@ else:
     st.info("Enable the AI assistant from the sidebar to analyze the selected stock.")
 
 st.markdown("---")
-st.caption("Data via Yahoo Finance (yfinance), logos via Clearbit/Finnhub. Educational use only — not financial advice.")
+st.caption("Data via Yahoo Finance, logos via Clearbit/Finnhub. Educational use only — not financial advice.")
