@@ -122,22 +122,93 @@ def compute_signal(df):
 
 
 def build_plot(df, chart_type="candlestick", show_ma=True):
+    """Build interactive stock chart with buy/sell markers."""
+    if df.empty:
+        return go.Figure()
+
     fig = go.Figure()
+
+    # --- Main price chart ---
     if chart_type == "candlestick":
         fig.add_trace(go.Candlestick(
-            x=df.index, open=df['Open'], high=df['High'], low=df['Low'], close=df['Close'], name='Price'))
+            x=df.index,
+            open=df['Open'],
+            high=df['High'],
+            low=df['Low'],
+            close=df['Close'],
+            name='Price',
+            increasing_line_color='#26a69a',
+            decreasing_line_color='#ef5350'
+        ))
     elif chart_type == "line":
-        fig.add_trace(go.Scatter(x=df.index, y=df['Close'], mode='lines', name='Close'))
+        fig.add_trace(go.Scatter(
+            x=df.index, y=df['Close'],
+            mode='lines', name='Close', line=dict(color='#42a5f5')
+        ))
     elif chart_type == "bar":
-        fig.add_trace(go.Bar(x=df.index, y=df['Close'], name='Close'))
+        fig.add_trace(go.Bar(x=df.index, y=df['Close'], name='Close', marker_color='#42a5f5'))
 
+    # --- Moving averages ---
     if show_ma:
-        if 'SMA_20' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_20'], mode='lines', name='SMA 20'))
-        if 'SMA_50' in df: fig.add_trace(go.Scatter(x=df.index, y=df['SMA_50'], mode='lines', name='SMA 50'))
+        if 'SMA_20' in df:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['SMA_20'],
+                mode='lines', name='SMA 20',
+                line=dict(width=1.5, color='orange')
+            ))
+        if 'SMA_50' in df:
+            fig.add_trace(go.Scatter(
+                x=df.index, y=df['SMA_50'],
+                mode='lines', name='SMA 50',
+                line=dict(width=1.5, color='purple')
+            ))
 
-    fig.update_layout(xaxis_rangeslider_visible=False, height=600, margin=dict(l=10, r=10, t=30, b=20))
+    # --- Buy/Sell markers ---
+    buy_signals, sell_signals = [], []
+    if all(col in df.columns for col in ['MACD', 'MACD_SIGNAL', 'RSI_14', 'SMA_50']):
+        for i in range(1, len(df)):
+            prev, curr = df.iloc[i - 1], df.iloc[i]
+            macd_up = prev['MACD'] < prev['MACD_SIGNAL'] and curr['MACD'] > curr['MACD_SIGNAL']
+            macd_down = prev['MACD'] > prev['MACD_SIGNAL'] and curr['MACD'] < curr['MACD_SIGNAL']
+            price_above = curr['Close'] > curr['SMA_50']
+            price_below = curr['Close'] < curr['SMA_50']
+            rsi = curr['RSI_14']
+
+            if macd_up and rsi < 70 and price_above:
+                buy_signals.append((df.index[i], curr['Low'] * 0.98))
+            elif macd_down and rsi > 30 and price_below:
+                sell_signals.append((df.index[i], curr['High'] * 1.02))
+
+    if buy_signals:
+        fig.add_trace(go.Scatter(
+            x=[x[0] for x in buy_signals],
+            y=[x[1] for x in buy_signals],
+            mode='markers',
+            name='BUY Signal',
+            marker=dict(symbol='triangle-up', color='green', size=12)
+        ))
+
+    if sell_signals:
+        fig.add_trace(go.Scatter(
+            x=[x[0] for x in sell_signals],
+            y=[x[1] for x in sell_signals],
+            mode='markers',
+            name='SELL Signal',
+            marker=dict(symbol='triangle-down', color='red', size=12)
+        ))
+
+    # --- Layout styling ---
+    fig.update_layout(
+        template='plotly_dark',
+        height=650,
+        xaxis_rangeslider_visible=False,
+        margin=dict(l=10, r=10, t=40, b=10),
+        hovermode="x unified",
+        plot_bgcolor="#0e1117",
+        paper_bgcolor="#0e1117",
+        font=dict(color="white")
+    )
     return fig
-
 
 @st.cache_data(ttl=3600)
 def get_company_info_fallback(ticker, info_dict):
